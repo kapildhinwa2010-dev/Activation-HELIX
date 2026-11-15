@@ -1,12 +1,18 @@
-# Activation-HELIX - Activation compression fused with HELIX spiral storage
+# Activation-HELIX - Activation matrices stored and recalled through HELIX
 # Part of the Kapildhinwa2010-dev Toolkit.
 
-"""HybridDNA - DNA compression plus wave-lattice memory in one store.
+"""Activation-HELIX: store layer activations in a HELIX-style wave store.
 
-Lineage: DNA + HELIX. Weight matrices are encoded into quantized Fourier
-genes (DNA) and the genes are stored in a wave lattice, so whole models are
-recalled by interference instead of a filename - and stored at a fraction
-of their raw size.
+Lineage: DNA + HELIX (reserv.dean-part-2). The storage engine (HybridStore)
+is shared with DNA-HELIX, which stores weight matrices; this module applies
+the same interference-recall storage to ACTIVATION matrices and adds
+SVD-truncated activation storage plus an optional PyTorch hook capture, so
+recorded activations can be recalled by name instead of a filename.
+
+Limitations (honest scope):
+- Recall is by nearest stored key above a similarity threshold; two very
+  similar layer names can collide.
+- SVD truncation is lossy; retained variance is reported per entry.
 """
 
 from __future__ import annotations
@@ -124,3 +130,83 @@ class HybridStore:
 
     def __len__(self) -> int:
         return len(self._names)
+
+
+class ActivationHelixStore(HybridStore):
+    """HELIX storage specialised for activation matrices.
+
+    put_activations() stores a (samples x features) activation block
+    truncated to its top ``rank`` singular components and reports the
+    retained variance. get_activations() recalls by exact name and
+    get_noisy() recalls through a perturbed key wave, like the base store.
+    """
+
+    def put_activations(self, layer: str, activations: np.ndarray, rank: int = 8):
+        """SVD-truncate activations, store them, return (ratio, retained)."""
+        acts = np.asarray(activations, dtype=np.float64)
+        if acts.ndim != 2 or acts.size == 0:
+            raise ValueError("activations must be a non-empty 2-D matrix")
+        if rank < 1:
+            raise ValueError("rank must be >= 1")
+        u, s, vt = np.linalg.svd(acts, full_matrices=False)
+        rank = min(rank, s.size)
+        total = float((s ** 2).sum())
+        retained = float((s[:rank] ** 2).sum() / total) if total > 0 else 1.0
+        approx = (u[:, :rank] * s[:rank]) @ vt[:rank, :]
+        ratio = self.put(layer, approx)
+        self._retained = getattr(self, "_retained", {})
+        self._retained[layer] = retained
+        return ratio, retained
+
+    def get_activations(self, layer: str) -> np.ndarray:
+        """Recall a stored activation block by exact name."""
+        return self.get(layer)
+
+    def retained_variance(self, layer: str) -> float:
+        """Retained variance reported when the layer was stored."""
+    try:
+        return self._retained[layer]
+    except (AttributeError, KeyError) as exc:
+        raise KeyError("layer not stored: {}".format(layer)) from exc
+
+    def capture_from_model(self, model, inputs, layer_pattern: str = ""):
+        """Capture activations from a PyTorch model via forward hooks.
+
+        Requires torch (imported lazily). Stores every Linear/Conv2d
+        output whose module name contains layer_pattern. Returns the
+        list of stored layer names.
+        """
+        try:
+            import torch  # noqa: F401
+            import torch.nn as _nn
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError("capture_from_model requires torch") from exc
+        captured = {}
+
+        def hook(_module, _inp, out):
+            captured[len(captured)] = out.detach().float().cpu().numpy()
+            return out
+
+        handles = []
+        for name, module in model.named_modules():
+            if isinstance(module, (_nn.Linear, _nn.Conv2d)) and layer_pattern in name:
+                handles.append(module.register_forward_hook(hook))
+        try:
+            import torch as _torch
+            with _torch.no_grad():
+                if isinstance(inputs, dict):
+                    model(**inputs)
+                else:
+                    model(inputs)
+        finally:
+            for h in handles:
+                h.remove()
+        stored = []
+        for i, act in sorted(captured.items()):
+            self.put_activations("layer_{}".format(i), act)
+            stored.append("layer_{}".format(i))
+        return stored
+
+    def list_layers(self) -> list:
+        """Sorted names of stored activation blocks."""
+        return self.list_models()

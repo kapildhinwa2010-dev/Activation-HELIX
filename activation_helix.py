@@ -164,10 +164,10 @@ class ActivationHelixStore(HybridStore):
 
     def retained_variance(self, layer: str) -> float:
         """Retained variance reported when the layer was stored."""
-    try:
-        return self._retained[layer]
-    except (AttributeError, KeyError) as exc:
-        raise KeyError("layer not stored: {}".format(layer)) from exc
+        try:
+            return self._retained[layer]
+        except (AttributeError, KeyError) as exc:
+            raise KeyError("layer not stored: {}".format(layer)) from exc
 
     def capture_from_model(self, model, inputs, layer_pattern: str = ""):
         """Capture activations from a PyTorch model via forward hooks.

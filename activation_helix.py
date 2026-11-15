@@ -21,7 +21,7 @@ import hashlib
 
 import numpy as np
 
-__all__ = ["HybridStore", "RecallMiss"]
+__all__ = ["HybridStore", "RecallMiss", "ActivationHelixStore"]
 
 
 class RecallMiss(Exception):
